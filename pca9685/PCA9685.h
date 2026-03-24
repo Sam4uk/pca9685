@@ -94,6 +94,23 @@ public:
     void setDutyCycle(uint8_t channel, float dutyCyclePc);
 
     /**
+     * Встановити ширину імпульсу в мікросекундах.
+     *
+     * Зручно для точного керування сервоприводами або будь-яким
+     * пристроєм, специфікація якого задана в мкс.
+     *
+     * Приклад (серво SG90, freq = 50 Гц):
+     *   setPulseWidth(0, 500);   // ~0°
+     *   setPulseWidth(0, 1500);  // ~90°
+     *   setPulseWidth(0, 2500);  // ~180°
+     *
+     * @param channel  0–15
+     * @param pulseUs  Ширина імпульсу в мікросекундах.
+     *                 Обрізається до [0 … 1 000 000 / freqHz].
+     */
+    void setPulseWidth(uint8_t channel, float pulseUs);
+
+    /**
      * Встановити кут сервоприводу.
      * @param channel    0–15
      * @param angleDeg   мінАнгл … максАнгл (за замовчуванням 0–180°)

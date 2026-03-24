@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
+#include <linux/i2c.h>
 
 #include <cmath>
 #include <cstring>
@@ -176,6 +177,21 @@ void PCA9685::setDutyCycle(uint8_t channel, float dutyCyclePc)
     setChannel(channel, 0, value);
 }
 
+void PCA9685::setPulseWidth(uint8_t channel, float pulseUs)
+{
+    // Тривалість одного PWM-періоду в мікросекундах
+    const float periodUs = 1'000'000.0f / m_freqHz;
+
+    pulseUs = std::clamp(pulseUs, 0.0f, periodUs);
+
+    // Кількість кроків = (pulseUs / periodUs) × 4096
+    auto offStep = static_cast<uint16_t>(
+        std::round(pulseUs / periodUs * static_cast<float>(STEPS - 1))
+    );
+
+    setChannel(channel, 0, offStep);
+}
+
 void PCA9685::setServoAngle(uint8_t channel, float angleDeg,
                              float minPulseUs, float maxPulseUs,
                              float minAngle,   float maxAngle)
@@ -273,12 +289,38 @@ void PCA9685::writeReg(uint8_t reg, uint8_t value) const
 
 uint8_t PCA9685::readReg(uint8_t reg) const
 {
-    if (::write(m_fd, &reg, 1) != 1)
-        throw std::runtime_error("PCA9685: readReg write-addr помилка");
-
+    // Потрібен I2C repeated start, щоб не втратити адресу регістру.
+    // Два повідомлення в одній атомарній транзакції:
+    //   [WRITE addr+reg] → Sr → [READ 1 байт]
     uint8_t value = 0;
-    if (::read(m_fd, &value, 1) != 1)
-        throw std::runtime_error("PCA9685: readReg read помилка");
+
+    struct i2c_msg msgs[2] = {
+        // 1. Надіслати адресу регістру (без STOP)
+        {
+            .addr  = m_address,
+            .flags = 0,
+            .len   = 1,
+            .buf   = &reg
+        },
+        // 2. Repeated start → зчитати 1 байт
+        {
+            .addr  = m_address,
+            .flags = I2C_M_RD,
+            .len   = 1,
+            .buf   = &value
+        }
+    };
+
+    struct i2c_rdwr_ioctl_data data = {
+        .msgs  = msgs,
+        .nmsgs = 2
+    };
+
+    if (ioctl(m_fd, I2C_RDWR, &data) < 0) {
+        throw std::runtime_error(
+            std::string("PCA9685: readReg(0x") +
+            std::to_string(reg) + ") помилка: " + std::strerror(errno));
+    }
 
     return value;
 }
