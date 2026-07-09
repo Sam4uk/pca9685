@@ -4,6 +4,12 @@
 #include <string>
 #include <stdexcept>
 
+// Підключаємо специфічні залежності залежно від платформи
+#if defined(USE_FT4232H)
+    #include "FT4232H_I2C.hpp"
+#endif
+
+
 /**
  * PCA9685 — 16-канальний PWM-контролер на I2C
  *
@@ -20,7 +26,6 @@ class PCA9685 {
 public:
     // ── Константи ────────────────────────────────────────────────
     static constexpr uint8_t  DEFAULT_ADDRESS = 0x40;
-    static constexpr int      DEFAULT_BUS     = 1;      // /dev/i2c-1
     static constexpr float    OSC_CLOCK_HZ    = 25'000'000.0f;
     static constexpr int      STEPS           = 4096;   // 12-бітна роздільність
     static constexpr float    MIN_FREQ_HZ     = 24.0f;
@@ -32,6 +37,11 @@ public:
      * @param bus      Номер I2C-шини (1 для більшості Pi)
      * @param address  I2C-адреса пристрою (0x40–0x7F)
      */
+#if defined(USE_FT4232H)
+    explicit PCA9685(FT4232H_I2C& i2c_bus, uint8_t address = DEFAULT_ADDRESS);
+    ~PCA9685();
+#else
+    static constexpr int      DEFAULT_BUS     = 1;      // /dev/i2c-1
     explicit PCA9685(int bus = DEFAULT_BUS, uint8_t address = DEFAULT_ADDRESS);
     ~PCA9685();
 
@@ -39,9 +49,10 @@ public:
     PCA9685(const PCA9685&)            = delete;
     PCA9685& operator=(const PCA9685&) = delete;
 
-    // Дозволити переміщення
+    // Дозволити переміщення тільки для системного I2C
     PCA9685(PCA9685&& other) noexcept;
     PCA9685& operator=(PCA9685&& other) noexcept;
+#endif
 
     // ── Ініціалізація ─────────────────────────────────────────────
 
@@ -158,7 +169,7 @@ public:
     uint8_t getMode2() const;
 
     /** true якщо шина відкрита і пристрій ініціалізовано. */
-    bool isOpen() const noexcept { return m_fd >= 0; }
+    bool isOpen() const noexcept;
 
 private:
     // ── Регістри PCA9685 ──────────────────────────────────────────
@@ -181,9 +192,13 @@ private:
     static constexpr uint8_t MODE2_OUTDRV  = 0x04;
 
     // ── Стан ─────────────────────────────────────────────────────
+#if defined(USE_FT4232H)
+    FT4232H_I2C& m_i2c;
+#else
     int     m_fd      = -1;
-    uint8_t m_address;
     int     m_bus;
+#endif
+    uint8_t m_address;
     float   m_freqHz  = 50.0f;
 
     // ── Низькорівневий I2C ────────────────────────────────────────

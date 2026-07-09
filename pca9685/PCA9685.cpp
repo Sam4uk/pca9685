@@ -1,21 +1,64 @@
+/**
+ * @file PCA9685.cpp
+ * @author Sam4uk (sam4uk.site@gmail.com)
+ * @brief 
+ * @version 0.1
+ * @date 2026-07-09
+ * 
+ * @copyright Copyright © Sam4uk 2026 (Sam4uk.site@gmail.com) 
+ * 
+ */
 #include "PCA9685.h"
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/i2c-dev.h>
-#include <linux/i2c.h>
+// Підключення для Linux I2C
+#if !defined(USE_FT4232H)
+    #include <fcntl.h>
+    #include <unistd.h>
+    #include <sys/ioctl.h>
+    #include <linux/i2c-dev.h>
+    #include <linux/i2c.h>
+    #include <cstring>
+#endif
 
 #include <cmath>
-#include <cstring>
 #include <thread>
 #include <chrono>
-#include <sstream>
+#include <stdexcept>
 #include <algorithm>
+#include <string>
 
 // ══════════════════════════════════════════════════════════════════════
 //  Конструктор / деструктор
 // ══════════════════════════════════════════════════════════════════════
+#if defined(USE_FT4232H)
+
+PCA9685::PCA9685(FT4232H_I2C& i2c_bus, uint8_t address)
+    : m_address(address), m_i2c(i2c_bus) {}
+
+PCA9685::~PCA9685() {}
+
+void PCA9685::open() {
+    if (!m_i2c.isOpen()) throw std::runtime_error("PCA9685: Шина FT4232H не відкрита!");
+    if (!m_i2c.pingDevice(m_address)) throw std::runtime_error("PCA9685: Пристрій не відповідає");
+    reset();
+}
+
+void PCA9685::close() noexcept {}
+
+void PCA9685::writeReg(uint8_t reg, uint8_t value) const {
+    if (!m_i2c.writeRegister(m_address, reg, {value})) {
+        throw std::runtime_error("PCA9685: помилка запису");
+    }
+}
+
+uint8_t PCA9685::readReg(uint8_t reg) const {
+    std::vector<uint8_t> data;
+    if (!m_i2c.readRegister(m_address, reg, data, 1)) {
+        throw std::runtime_error("PCA9685: помилка читання");
+    }
+    return data[0];
+}
+
+#else // Стандартний Linux I2C
 
 PCA9685::PCA9685(int bus, uint8_t address)
     : m_address(address), m_bus(bus)
@@ -57,23 +100,18 @@ void PCA9685::open()
     std::string path = "/dev/i2c-" + std::to_string(m_bus);
 
     m_fd = ::open(path.c_str(), O_RDWR);
-    if (m_fd < 0) {
-        throw std::runtime_error("PCA9685: не вдалося відкрити " + path +
-                                 ": " + std::strerror(errno));
-    }
-
-    if (ioctl(m_fd, I2C_SLAVE, m_address) < 0) {
-        ::close(m_fd);
-        m_fd = -1;
-        std::ostringstream oss;
-        oss << "PCA9685: ioctl I2C_SLAVE 0x"
-            << std::hex << static_cast<int>(m_address)
-            << " помилка: " << std::strerror(errno);
-        throw std::runtime_error(oss.str());
-    }
-
+    if (m_fd < 0) throw std::runtime_error("PCA9685: не вдалося відкрити " + path);
+    if (ioctl(m_fd, I2C_SLAVE, m_address) < 0) throw std::runtime_error("PCA9685: помилка ioctl");
     reset();
 }
+
+bool isOpen() const noexcept {
+#if defined(USE_FT4232H)
+        return m_i2c.isOpen();
+#else
+        return m_fd >= 0;
+#endif
+    }
 
 void PCA9685::close() noexcept
 {
@@ -82,6 +120,28 @@ void PCA9685::close() noexcept
         m_fd = -1;
     }
 }
+
+void PCA9685::writeReg(uint8_t reg, uint8_t value) const {
+    uint8_t buf[2] = { reg, value };
+    if (::write(m_fd, buf, 2) != 2) throw std::runtime_error("PCA9685: помилка запису");
+}
+
+uint8_t PCA9685::readReg(uint8_t reg) const {
+    uint8_t value = 0;
+    struct i2c_msg msgs[2] = {
+        { m_address, 0, 1, &reg },
+        { m_address, I2C_M_RD, 1, &value }
+    };
+    struct i2c_rdwr_ioctl_data data = { msgs, 2 };
+    if (ioctl(m_fd, I2C_RDWR, &data) < 0) throw std::runtime_error("PCA9685: помилка читання");
+    return value;
+}
+
+#endif // USE_FT4232H
+
+// ══════════════════════════════════════════════════════════════════════
+//  Спільні методи (Логіка ШІМ) — НІЧОГО НЕ ТРЕБА ЗМІНЮВАТИ АБО ДУБЛЮВАТИ!
+// ══════════════════════════════════════════════════════════════════════
 
 void PCA9685::reset()
 {
@@ -138,19 +198,16 @@ void PCA9685::setChannel(uint8_t channel, uint16_t on, uint16_t off)
 
     uint8_t base = REG_LED0_ON_L + channel * 4;
 
-    // Записуємо 4 байти з auto-increment:
-    // ON_L, ON_H, OFF_L, OFF_H
-    uint8_t buf[5] = {
-        base,
+    // Записуємо 4 байти (наш клас FT4232H_I2C сам додасть адресу регістра `base` на початок)
+    std::vector<uint8_t> data = {
         static_cast<uint8_t>(on  & 0xFF),
         static_cast<uint8_t>(on  >> 8),
         static_cast<uint8_t>(off & 0xFF),
         static_cast<uint8_t>(off >> 8)
     };
 
-    if (::write(m_fd, buf, sizeof(buf)) != sizeof(buf)) {
-        throw std::runtime_error("PCA9685: помилка запису каналу " +
-                                 std::to_string(channel));
+    if (!m_i2c.writeRegister(m_address, base, data)) {
+        throw std::runtime_error("PCA9685: помилка запису каналу " + std::to_string(channel));
     }
 }
 
@@ -215,10 +272,10 @@ void PCA9685::setServoAngle(uint8_t channel, float angleDeg,
 void PCA9685::setChannelOff(uint8_t channel)
 {
     validateChannel(channel);
-    // Bit 4 в OFF_H встановлює повний LOW
     uint8_t base = REG_LED0_ON_L + channel * 4;
-    uint8_t buf[5] = { base, 0x00, 0x00, 0x00, 0x10 };
-    if (::write(m_fd, buf, sizeof(buf)) != sizeof(buf))
+    std::vector<uint8_t> data = { 0x00, 0x00, 0x00, 0x10 };
+    
+    if (!m_i2c.writeRegister(m_address, base, data))
         throw std::runtime_error("PCA9685: setChannelOff failed");
 }
 
@@ -227,21 +284,22 @@ void PCA9685::setChannelOn(uint8_t channel)
     validateChannel(channel);
     // Bit 4 в ON_H встановлює повний HIGH
     uint8_t base = REG_LED0_ON_L + channel * 4;
-    uint8_t buf[5] = { base, 0x00, 0x10, 0x00, 0x00 };
-    if (::write(m_fd, buf, sizeof(buf)) != sizeof(buf))
+    std::vector<uint8_t> data = { 0x00, 0x10, 0x00, 0x00 };
+    
+    if (!m_i2c.writeRegister(m_address, base, data))
         throw std::runtime_error("PCA9685: setChannelOn failed");
 }
 
 void PCA9685::setAllChannels(uint16_t on, uint16_t off)
 {
-    uint8_t buf[5] = {
-        REG_ALL_ON_L,
+    std::vector<uint8_t> data = {
         static_cast<uint8_t>(on  & 0xFF),
         static_cast<uint8_t>(on  >> 8),
         static_cast<uint8_t>(off & 0xFF),
         static_cast<uint8_t>(off >> 8)
     };
-    if (::write(m_fd, buf, sizeof(buf)) != sizeof(buf))
+    
+    if (!m_i2c.writeRegister(m_address, REG_ALL_ON_L, data))
         throw std::runtime_error("PCA9685: setAllChannels failed");
 }
 
@@ -278,56 +336,8 @@ uint8_t PCA9685::getMode2() const { return readReg(REG_MODE2); }
 //  Приватні методи
 // ══════════════════════════════════════════════════════════════════════
 
-void PCA9685::writeReg(uint8_t reg, uint8_t value) const
-{
-    uint8_t buf[2] = { reg, value };
-    if (::write(m_fd, buf, 2) != 2) {
-        throw std::runtime_error("PCA9685: writeReg(0x" +
-            std::to_string(reg) + ") помилка: " + std::strerror(errno));
-    }
-}
-
-uint8_t PCA9685::readReg(uint8_t reg) const
-{
-    // Потрібен I2C repeated start, щоб не втратити адресу регістру.
-    // Два повідомлення в одній атомарній транзакції:
-    //   [WRITE addr+reg] → Sr → [READ 1 байт]
-    uint8_t value = 0;
-
-    struct i2c_msg msgs[2] = {
-        // 1. Надіслати адресу регістру (без STOP)
-        {
-            .addr  = m_address,
-            .flags = 0,
-            .len   = 1,
-            .buf   = &reg
-        },
-        // 2. Repeated start → зчитати 1 байт
-        {
-            .addr  = m_address,
-            .flags = I2C_M_RD,
-            .len   = 1,
-            .buf   = &value
-        }
-    };
-
-    struct i2c_rdwr_ioctl_data data = {
-        .msgs  = msgs,
-        .nmsgs = 2
-    };
-
-    if (ioctl(m_fd, I2C_RDWR, &data) < 0) {
-        throw std::runtime_error(
-            std::string("PCA9685: readReg(0x") +
-            std::to_string(reg) + ") помилка: " + std::strerror(errno));
-    }
-
-    return value;
-}
-
 void PCA9685::validateChannel(uint8_t channel) const
 {
     if (channel > 15)
-        throw std::invalid_argument("PCA9685: канал " +
-            std::to_string(channel) + " поза діапазоном 0–15");
+        throw std::invalid_argument("PCA9685: канал " + std::to_string(channel) + " поза діапазоном 0–15");
 }
